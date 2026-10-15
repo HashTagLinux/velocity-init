@@ -1,0 +1,7 @@
+# The dinit "boot" pseudo-service: an internal service that starts
+# every service found in boot.d. Dinit does not treat boot.d
+# specially on its own — the built-in default start target is the
+# service named "boot", so this description must exist or no services
+# are started at all.
+type = internal
+waits-for.d = boot.d

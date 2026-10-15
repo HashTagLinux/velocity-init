@@ -1,0 +1,43 @@
+#!/bin/sh
+# initramfs-tools hook for velocity-init.
+#
+# Copies the static PID 1 binary (and its control client) into the
+# initramfs so the kernel can exec velocity-init with
+# `init=/sbin/velocity-init` before the real root filesystem is even
+# available. The initramfs-tools framework picks the `init=` argument
+# out of /proc/cmdline by itself, so all we must do here is make sure
+# the binary is present.
+#
+# Install location: /usr/share/initramfs-tools/hooks/velocity-init
+set -e
+
+PREREQ=""
+prereqs() {
+    echo "$PREREQ"
+}
+case "$1" in
+    prereqs)
+        prereqs
+        exit 0
+        ;;
+esac
+
+# The binary paths are overridable for image builders and the test suite.
+VELOCITY_INIT_BIN="${VELOCITY_INIT_BIN:-/sbin/velocity-init}"
+VELOCITYCTL_BIN="${VELOCITYCTL_BIN:-/usr/bin/velocityctl}"
+
+if [ -r /usr/share/initramfs-tools/hook-functions ]; then
+    # canonical initramfs-tools way: copy_exec handles the opt/
+    # detection and the $DESTDIR staging tree for us.
+    # shellcheck disable=SC1091
+    . /usr/share/initramfs-tools/hook-functions
+
+    copy_exec "${VELOCITY_INIT_BIN}" /sbin/velocity-init
+    copy_exec "${VELOCITYCTL_BIN}" /usr/bin/velocityctl
+else
+    # Fallback for minimal initramfs-tools-core installs: copy straight
+    # into the staging root (it is created and exported by the
+    # mkinitramfs wrapper we are running under).
+    install -D -m 0755 "${VELOCITY_INIT_BIN}" "${DESTDIR}/sbin/velocity-init"
+    install -D -m 0755 "${VELOCITYCTL_BIN}" "${DESTDIR}/usr/bin/velocityctl"
+fi

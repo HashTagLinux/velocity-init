@@ -1,0 +1,63 @@
+#!/bin/sh
+# initramfs-tools bottom-stage script for velocity-init.
+#
+# Runs at the very end of the initramfs lifecycle, after the real root
+# filesystem has been mounted and the early userspace is about to
+# hand control to the kernel's init= argument (which the framework
+# resolves itself). We use this stage to:
+#
+#   * confirm velocity-init was requested (init=/sbin/velocity-init)
+#   * fail loudly — dropping to a shell — if the binary is not there,
+#     instead of letting the kernel panic with a silent "attempted to
+#     kill init!"
+#
+# Install location:
+#   /usr/share/initramfs-tools/scripts/init-bottom/velocity-init
+set -e
+
+PREREQ=""
+prereqs() {
+    echo "$PREREQ"
+}
+case "$1" in
+    prereqs)
+        prereqs
+        exit 0
+        ;;
+esac
+
+# /proc is mounted by the init-top stage long before we run; /proc/cmdline
+# carries the kernel's boot arguments. VELOCITY_CMDLINE can override it
+# for tests.
+if [ -n "${VELOCITY_CMDLINE:-}" ]; then
+    kernel_cmdline="${VELOCITY_CMDLINE}"
+else
+    kernel_cmdline="$(cat /proc/cmdline 2>/dev/null || true)"
+fi
+want_velocity=0
+for arg in ${kernel_cmdline}; do
+    case "$arg" in
+        init=/sbin/velocity-init | init=velocity-init)
+            want_velocity=1
+            ;;
+    esac
+done
+
+# Binary location is overridable for tests (VELOCITY_BIN_CHECK).
+velocity_bin="${VELOCITY_BIN_CHECK:-/sbin/velocity-init}"
+
+[ "${want_velocity}" -eq 1 ] || exit 0
+
+if [ ! -x "${velocity_bin}" ]; then
+    echo "velocity-init: init=/sbin/velocity-init was requested, but the" >&2
+    echo "velocity-init: binary is missing from the initramfs." >&2
+    echo "velocity-init: Re-run: update-initramfs -u" >&2
+    # Drop into the emergency shell so the operator can recover.
+    # shellcheck disable=SC1091
+    . /usr/share/initramfs-tools/scripts/functions 2>/dev/null || true
+    panic "velocity-init is not present in the initramfs" 2>/dev/null || exit 1
+else
+    echo "velocity-init: root filesystem is mounted — handing PID 1 over"
+fi
+
+exit 0

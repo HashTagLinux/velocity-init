@@ -1,0 +1,6 @@
+# /etc/fstab: static file system information.
+UUID=8f4a1c2e-…   /           ext4   defaults           0 1
+UUID=ab03…        /home       ext4   defaults,noatime,nofail 0 2
+/dev/sdb2         swap        swap   defaults           0 0
+
+UUID=oops-only-three-fields /x ext4

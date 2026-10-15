@@ -1,0 +1,31 @@
+#!/bin/sh
+# The benchmark workload: a single idle, supervised process.
+#
+# Shared by all three init systems:
+#   - velocity-init runs this via the LSB wrapper (foreground)
+#   - OpenRC runs this via the LSB wrapper (backgrounded, pidfile)
+#   - dinit runs this directly as a `process` service
+#
+# Contract:
+#   - On start: write /tmp/bench-svc.pid (own pid) and
+#     /tmp/bench-svc.ready (own pid) so the harness can time boot and
+#     detect restarts.
+#   - On SIGTERM: remove both markers and exit 0 — a "clean daemon
+#     stop". This keeps `docker stop` shutdown clean for every init.
+#     NOTE: SIGKILL (the supervision test) leaves the stale markers,
+#     so a restarted service is detected by the pid content changing.
+READY=/tmp/bench-svc.ready
+PIDFILE=/tmp/bench-svc.pid
+
+cleanup() {
+  rm -f "$READY" "$PIDFILE"
+  exit 0
+}
+trap cleanup TERM INT
+
+echo "$$" > "$PIDFILE"
+echo "$$" > "$READY"
+
+while :; do
+  sleep 30
+done

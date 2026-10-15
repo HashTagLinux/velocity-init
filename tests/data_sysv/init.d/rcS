@@ -1,0 +1,4 @@
+#!/bin/sh
+# SysV fixture: the `si::sysinit` boot script.
+echo "rcS: system initialization (sysv fixture)"
+exit 0

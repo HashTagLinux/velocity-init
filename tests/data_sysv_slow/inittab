@@ -1,0 +1,12 @@
+# velocity-init test fixture — a sysvinit boot whose sysinit line
+# never finishes on its own.
+#
+# The `sleep 300` is longer than SYSV_EXIT_TIMEOUT (300s) is *useful*:
+# without a shutdown signal this init would sit in the boot wait for
+# minutes. With one it must abort on the next tick. That is the whole
+# point of the fixture, so the duration is deliberately absurd.
+#
+# No respawn/once lines: the boot must never get past `si::sysinit`, so
+# the run cannot reach a stage where it would start anything else.
+id:3:initdefault:
+si::sysinit:echo slow-rcS-started && sleep 300

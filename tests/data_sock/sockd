@@ -1,0 +1,22 @@
+#!/bin/sh
+### BEGIN INIT INFO
+# Provides:          sockd
+# Required-Start:
+# Required-Stop:
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: Test service using socket activation
+# X-Velocity-Socket: tcp:0 unix:/tmp/velocity-sockd.sock
+### END INIT INFO
+
+case "$1" in
+  start)
+    echo "sockd: LISTEN_FDS=$LISTEN_FDS LISTEN_FDS_START=$LISTEN_FDS_START LISTEN_PID=$LISTEN_PID"
+    echo "sockd: own pid=$$"
+    echo "sockd: fd3=$(ls -l /proc/self/fd/3 2>/dev/null || echo missing)"
+    echo "sockd: fd4=$(ls -l /proc/self/fd/4 2>/dev/null || echo missing)"
+    ;;
+  stop)
+    echo "sockd stopping"
+    ;;
+esac

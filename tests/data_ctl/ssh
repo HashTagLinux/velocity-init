@@ -1,0 +1,21 @@
+#!/bin/sh
+### BEGIN INIT INFO
+# Provides:          ssh
+# Required-Start:
+# Required-Stop:
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: Test service managed through the control socket
+# X-Velocity-Limit:  pids.max=32 memory.max=1G
+### END INIT INFO
+
+case "$1" in
+  start)
+    echo "ssh starting (waiting for READY=1)"
+    # Stay alive in the foreground; the test releases us with READY=1.
+    sleep 60
+    ;;
+  stop)
+    echo "ssh stopping"
+    ;;
+esac

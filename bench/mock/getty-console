@@ -1,0 +1,27 @@
+#!/bin/sh
+# Stub getty for the velocity-init benchmark image.
+#
+# velocity-init injects a built-in console getty (restarted *always*,
+# no backoff) unless a service whose name contains "getty" already
+# exists. In a container there is no /dev/console, so the built-in
+# would respawn in a tight loop and skew the resource/supervision
+# numbers. This stub suppresses the injection and exits 0 (a clean
+# exit 0 means "daemonized" to velocity-init, so it is never
+# restarted). A real deployment would put `exec /sbin/agetty ...`
+# here instead.
+### BEGIN INIT INFO
+# Provides:          getty
+# Required-Start:
+# Required-Stop:
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: Benchmark stub suppressing the built-in getty
+### END INIT INFO
+
+case "$1" in
+  start)
+    exit 0
+    ;;
+  stop)
+    ;;
+esac

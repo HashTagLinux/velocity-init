@@ -1,0 +1,10 @@
+#!/bin/sh
+### BEGIN INIT INFO
+# Provides:          cycle_a
+# Required-Start:    cycle_b
+# Required-Stop:     
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: Cycle test node A
+### END INIT INFO
+echo "cycle_a"

@@ -1,0 +1,7 @@
+# velocity-init test fixture — a miniature sysvinit configuration.
+id:3:initdefault:
+si::sysinit:/etc/init.d/rcS
+l0:0:wait:/etc/init.d/rc 0
+l3:3:wait:/etc/init.d/rc 3
+tty1:3:respawn:/etc/init.d/getty 38400 tty1
+ca:123456:ctrlaltdel:/etc/init.d/rc 0

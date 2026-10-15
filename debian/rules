@@ -1,0 +1,33 @@
+#!/usr/bin/make -f
+# debian/rules — build entry for `dpkg-buildpackage`.
+#
+# Builds the binaries with the distribution's own toolchain, so the
+# result is linked against the exact glibc it will boot with: the
+# initramfs on a Debian-family install ships glibc, and a PID 1 that
+# needs a *newer* glibc than the machine has fails at the worst
+# possible moment. This is why the package is built inside the target
+# distro (docker/Dockerfile.freia is the containerised way to do that)
+# rather than cross-compiled elsewhere.
+
+export VELOCITY_BUILD_ID = $(shell dpkg-parsechangelog -SVersion)
+
+%:
+	dh $@
+
+override_dh_auto_configure:
+	true
+
+override_dh_auto_build:
+	VELOCITY_BUILD_ID="$(VELOCITY_BUILD_ID)" cargo build --release --bins --locked
+
+override_dh_auto_test:
+	cargo test --quiet
+
+override_dh_auto_install:
+	install -D -m 0755 target/release/velocity-init debian/velocity-init/sbin/velocity-init
+	install -D -m 0755 target/release/velocityctl            debian/velocity-init/usr/bin/velocityctl
+	install -D -m 0755 pkg/grub-maintain.sh                   debian/velocity-init/usr/share/velocity-init/grub-maintain.sh
+	install -D -m 0755 pkg/grub-append.awk                    debian/velocity-init/usr/share/velocity-init/grub-append.awk
+	install -D -m 0755 pkg/grub-remove.awk                    debian/velocity-init/usr/share/velocity-init/grub-remove.awk
+	install -D -m 0755 debian/velocity-init.hook              debian/velocity-init/usr/share/initramfs-tools/hooks/velocity-init
+	install -D -m 0755 debian/init-bottom                     debian/velocity-init/usr/share/initramfs-tools/scripts/init-bottom/velocity-init

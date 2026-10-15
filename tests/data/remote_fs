@@ -1,0 +1,10 @@
+#!/bin/sh
+### BEGIN INIT INFO
+# Provides:          $remote_fs
+# Required-Start:    $network
+# Required-Stop:     $network
+# Default-Start:     S
+# Default-Stop:      0 6
+# Short-Description: Mount remote filesystems
+### END INIT INFO
+echo "remote_fs started"

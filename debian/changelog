@@ -1,0 +1,12 @@
+velocity-init (0.1.0-1) unstable; urgency=medium
+
+  * Initial release: a Rust PID 1 that boots LSB-header init scripts
+    from a dependency graph in parallel and supervises them with crash
+    restart + cgroup v2 scoping; full SysV /etc/inittab drop-in mode
+    (telinit, runlevel, utmp, ctrl-alt-del, power-failure signals).
+  * Ships /sbin/velocity-init, velocityctl, an initramfs-tools hook and
+    an init-bottom stage so it can be selected with
+    init=/sbin/velocity-init on the kernel command line.
+  * postinst/prerm manage GRUB_CMDLINE_LINUX_DEFAULT idempotently.
+
+ -- velocity-init developers <maintainer@example.com>  Thu, 06 Aug 2026 21:30:00 +0000

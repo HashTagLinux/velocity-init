@@ -1,0 +1,19 @@
+#!/bin/sh
+### BEGIN INIT INFO
+# Provides:          crashy
+# Required-Start:
+# Required-Stop:
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: Demo service that fails, to show backoff restarts
+# X-Velocity-Env:    crashy.env
+### END INIT INFO
+
+case "$1" in
+  start)
+    echo "crashy starting with MODE=$MODE (will exit 3)"
+    exit 3
+    ;;
+  stop)
+    ;;
+esac

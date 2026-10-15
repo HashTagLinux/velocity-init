@@ -1,0 +1,3 @@
+# Mounted by velocity-init itself (PID 1) during boot, proving the
+# fstab phase: a tiny tmpfs at /var/run-vtest.
+tmpfs /var/run-vtest tmpfs size=1m,mode=0750 0 0

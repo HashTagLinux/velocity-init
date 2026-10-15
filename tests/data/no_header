@@ -1,0 +1,3 @@
+#!/bin/sh
+# This script has no LSB INIT INFO header.
+echo "I have no LSB header"

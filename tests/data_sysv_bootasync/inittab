@@ -1,0 +1,12 @@
+# Fixture: a `boot:` line that never finishes on its own, followed by a
+# `wait:` line. sysvinit does not wait for `boot:` lines (inittab(5)), so
+# the boot must proceed to the `wait:` line without stalling. A `boot:`
+# line that runs a long-lived process would otherwise stall the boot for
+# SYSV_EXIT_TIMEOUT (300s).
+#
+# The commands are self-contained (no /etc/init.d dependency) so the
+# fixture runs identically on any host.
+id:2:initdefault:
+si::sysinit:echo rcS-started
+lb::boot:echo bootlong-started && sleep 3600
+l2:2:wait:echo rc-runlevel-2

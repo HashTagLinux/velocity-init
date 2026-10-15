@@ -1,0 +1,27 @@
+Source: velocity-init
+Section: admin
+Priority: optional
+Maintainer: velocity-init developers <maintainer@example.com>
+Build-Depends: debhelper (>= 13), cargo (>= 1.60)
+Standards-Version: 4.6.2
+Rules-Requires-Root: binary-targets
+
+Package: velocity-init
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends},
+         initramfs-tools | initramfs-tools-core,
+         adduser
+Recommends: procps, kbd
+Description: A modern dependency-based init system and service manager
+ velocity-init is a lightweight alternative to sysvinit and systemd,
+ implemented in Rust as a supervised PID 1.
+ .
+ It boots LSB-header init scripts in parallel according to a dependency
+ DAG, supervises services with crash detection and exponential-backoff
+ restarts, scopes processes in cgroups v2, supports socket activation,
+ and acts as a full /etc/inittab drop-in for Devuan (telinit, runlevel,
+ who -r, ctrl-alt-del and power-failure signals).
+ .
+ This package installs the static binary to /sbin/velocity-init and adds
+ an initramfs-tools hook so it can be selected with init=/sbin/velocity-init
+ on the kernel command line.

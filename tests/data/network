@@ -1,0 +1,10 @@
+#!/bin/sh
+### BEGIN INIT INFO
+# Provides:          $network
+# Required-Start:    
+# Required-Stop:     
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: Raise network interfaces
+### END INIT INFO
+echo "network started"

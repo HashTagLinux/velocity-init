@@ -1,0 +1,9 @@
+# dinit service for the benchmark mock.
+#
+# `restart = on-failure`: a SIGKILL (the supervision test) is an
+# unexpected, non-zero termination, so dinit restarts the service. A
+# clean SIGTERM-trap exit 0 during shutdown never restarts anything
+# (dinit is already stopping the service).
+type = process
+command = /usr/libexec/bench-svc-run
+restart = on-failure

@@ -1,0 +1,38 @@
+# /etc/inittab — velocity-init SysV drop-in configuration.
+#
+# velocity-init reads this file when it replaces sysv (Devuan). Syntax
+# is the classic SysV inittab; see inittab(5).
+#
+#   id:2:initdefault:          default runlevel (2 on Devuan)
+#   si::sysinit:...            first boot hook (rcS)
+#   lN:N:wait:...              per-runlevel "wait" lines (rc N)
+#   N:12345:respawn:...        supervised respawn lines (getty/es)
+#   ca:12345:ctrlaltdel:...    executed on ctrl+alt+del (SIGINT)
+#   pf:12345:powerfail:...     power-failure / UPS events (SIGPWR etc.)
+
+# Default runlevel.
+id:2:initdefault:
+
+# System initialization (SysV init.d).
+si::sysinit:/etc/init.d/rcS
+
+# The start / stop scripts for the classic runlevels.
+l0:0:wait:/etc/init.d/rc 0
+l1:1:wait:/etc/init.d/rc 1
+l2:2:wait:/etc/init.d/rc 2
+l3:3:wait:/etc/init.d/rc 3
+l4:4:wait:/etc/init.d/rc 4
+l5:5:wait:/etc/init.d/rc 5
+l6:6:wait:/etc/init.d/rc 6
+
+# Ctrl+Alt+Del (SIGINT) and the UPS power lines. These run the command
+# through /bin/sh -c; the velocityctl symlinks satisfy them.
+ca:12345:ctrlaltdel:/sbin/reboot
+pf::powerfail:/sbin/shutdown powerfail
+
+# Console gettys; velocity-init supervises them (restart on exit).
+# Disable VTs that don't exist on your hardware.
+1:2345:respawn:/sbin/agetty 38400 tty1 linux
+2:2345:respawn:/sbin/agetty 38400 tty2 linux
+3:2345:respawn:/sbin/agetty 38400 tty3 linux
+4:2345:respawn:/sbin/agetty 38400 tty4 linux

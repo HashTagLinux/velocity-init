@@ -1,0 +1,32 @@
+#!/bin/sh
+# prerm — remove velocity-init from the boot configuration.
+#
+#  1. drop `init=/sbin/velocity-init` from GRUB_CMDLINE_LINUX_DEFAULT
+#     and run update-grub (idempotent)
+#  2. leave the initramfs alone: once the `init=` argument is gone the
+#     kernel falls back to the default /sbin/init, and the hook file is
+#     removed together with the package; a fresh boot regenerates the
+#     initramfs on its own.
+set -e
+
+# VELOCITY_GRUB_LIBDIR is honoured for tests and image builds.
+GRUB_LIBDIR="${VELOCITY_GRUB_LIBDIR:-/usr/share/velocity-init}"
+if [ -r "${GRUB_LIBDIR}/grub-maintain.sh" ]; then
+    # shellcheck disable=SC1091
+    . "${GRUB_LIBDIR}/grub-maintain.sh"
+else
+    v_grub_remove_init() { return 0; }
+    v_grub_reapply() { return 0; }
+fi
+
+case "$1" in
+    remove | upgrade | deconfigure)
+        if v_grub_remove_init; then
+            : # argument absent already (or no GRUB config)
+        else
+            v_grub_reapply
+        fi
+        ;;
+esac
+
+exit 0

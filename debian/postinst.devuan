@@ -1,0 +1,54 @@
+#!/bin/sh
+# postinst (Devuan replacement build) — swap this system over to
+# velocity-init as the actual /sbin/init.
+#
+#   1. create /run/velocity-init
+#   2. install a default /etc/inittab on first configure (never
+#      overwrite an existing one — it may carry local getty/console
+#      policy)
+#   3. keep the GRUB `init=` argument in sync (belt-and-braces; the
+#      /sbin/init symlink already satisfies the kernel's default init)
+#   4. rebuild the initramfs
+set -e
+
+# VELOCITY_GRUB_LIBDIR is honoured for tests and image builds.
+GRUB_LIBDIR="${VELOCITY_GRUB_LIBDIR:-/usr/share/velocity-init}"
+if [ -r "${GRUB_LIBDIR}/grub-maintain.sh" ]; then
+    # shellcheck disable=SC1091
+    . "${GRUB_LIBDIR}/grub-maintain.sh"
+else
+    v_grub_append_init() { return 0; }
+    v_grub_reapply() { return 0; }
+    v_initramfs_rebuild() { return 0; }
+fi
+
+case "$1" in
+    configure)
+        # Runtime arena for the control socket.
+        mkdir -p /run/velocity-init 2>/dev/null || \
+            echo "velocity-init: warning: could not create /run/velocity-init" >&2
+        chmod 0755 /run/velocity-init 2>/dev/null || true
+
+        # ── inittab drop-in ──────────────────────────────────────────
+        if [ ! -f /etc/inittab ]; then
+            cp /usr/share/velocity-init/inittab /etc/inittab 2>/dev/null && \
+                echo "velocity-init: installed a default /etc/inittab (runlevel 2)" || true
+        fi
+
+        # ── keep GRUB pointed at us (idempotent) ─────────────────────
+        if v_grub_append_init; then
+            : # argument already present (or no GRUB config)
+        else
+            v_grub_reapply
+        fi
+
+        # ── ship the binary into the boot image ──────────────────────
+        v_initramfs_rebuild
+
+        echo "velocity-init: Devuan build installed."
+        echo "  /sbin/init replaces sysvinit              (next boot uses velocity-init)"
+        echo "  telinit/reboot/halt/poweroff/shutdown/runlevel  -> velocityctl"
+        ;;
+esac
+
+exit 0

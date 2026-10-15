@@ -1,0 +1,4 @@
+#!/bin/sh
+# SysV fixture: the per-runlevel script (`rc N`).
+echo "rc: starting runlevel $1"
+exit 0

@@ -1,0 +1,46 @@
+#!/bin/sh
+# postinst — enable velocity-init as the PID 1 drop-in.
+#
+#  1. create /run/velocity-init (control socket runtime arena)
+#  2. add `init=/sbin/velocity-init` to GRUB_CMDLINE_LINUX_DEFAULT and
+#     run update-grub (idempotent)
+#  3. rebuild the initramfs so the initramfs-tools hook ships the
+#     static binary into the early-boot image
+set -e
+
+# VELOCITY_GRUB_LIBDIR is honoured for tests and image builds.
+GRUB_LIBDIR="${VELOCITY_GRUB_LIBDIR:-/usr/share/velocity-init}"
+if [ -r "${GRUB_LIBDIR}/grub-maintain.sh" ]; then
+    # shellcheck disable=SC1091
+    . "${GRUB_LIBDIR}/grub-maintain.sh"
+else
+    v_grub_append_init() { return 0; }
+    v_grub_reapply() { return 0; }
+    v_initramfs_rebuild() { return 0; }
+fi
+
+case "$1" in
+    configure)
+        # Runtime arena for the control socket. Transient (backed by
+        # tmpfs), but pre-creating it means velocityctl works even when
+        # PID 1 hasn't mkdir'd it yet (e.g. first-boot ordering).
+        mkdir -p /run/velocity-init 2>/dev/null || \
+            echo "velocity-init: warning: could not create /run/velocity-init" >&2
+        chmod 0755 /run/velocity-init 2>/dev/null || true
+
+        # ── GRUB: switch the boot command line to velocity-init ──────
+        if v_grub_append_init; then
+            : # argument already present (or no GRUB config)
+        else
+            v_grub_reapply
+        fi
+
+        # ── Initramfs: ship the binary into the boot image ───────────
+        v_initramfs_rebuild
+
+        echo "velocity-init: installed — the next boot uses init=/sbin/velocity-init"
+        echo "                (to boot the fallback init later, remove the argument from /etc/default/grub)"
+        ;;
+esac
+
+exit 0

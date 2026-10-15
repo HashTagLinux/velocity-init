@@ -1,0 +1,21 @@
+#!/bin/sh
+### BEGIN INIT INFO
+# Provides:          printer
+# Required-Start:
+# Required-Stop:
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: Test service that writes to stdout and stderr
+### END INIT INFO
+
+case "$1" in
+  start)
+    echo "printer says hello stdout"
+    echo "printer says hello stderr" >&2
+    # Stay alive in the foreground; the supervisor watches us.
+    sleep 60
+    ;;
+  stop)
+    echo "printer stopping"
+    ;;
+esac

@@ -1,0 +1,22 @@
+#!/bin/sh
+### BEGIN INIT INFO
+# Provides:          demo
+# Required-Start:
+# Required-Stop:
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: Environment-file injection test
+# X-Velocity-Env:    demo.env
+### END INIT INFO
+
+case "$1" in
+  start)
+    # FOO comes from the env file (overriding the inherited value),
+    # BAZ from an `export` line, EMPTY from an empty assignment, and
+    # INHERITED straight from the parent environment.
+    echo "env FOO=$FOO BAZ=$BAZ EMPTY='$EMPTY' INHERITED=$INHERITED"
+    sleep 60
+    ;;
+  stop)
+    ;;
+esac

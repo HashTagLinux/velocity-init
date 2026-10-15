@@ -1,0 +1,21 @@
+#!/bin/sh
+### BEGIN INIT INFO
+# Provides:          notify_me
+# Required-Start:
+# Required-Stop:
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: Test service that stays in Starting until READY=1
+### END INIT INFO
+
+case "$1" in
+  start)
+    echo "notify_me starting (foreground; waiting for READY=1)"
+    # Stay alive in the foreground so the supervisor keeps watching us.
+    # The test sends "READY=1" to our $NOTIFY_SOCKET to release boot.
+    sleep 60
+    ;;
+  stop)
+    echo "notify_me stopping"
+    ;;
+esac

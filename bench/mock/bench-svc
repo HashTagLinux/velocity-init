@@ -1,0 +1,55 @@
+#!/bin/sh
+# LSB init script for the benchmark mock service.
+#
+# Runs under BOTH OpenRC and velocity-init:
+#   - OpenRC (runscript) sets $RC_SVCNAME, so the start case
+#     backgrounds the loop and writes a pidfile — the classic SysV
+#     daemon pattern, so `rc default` returns and the runlevel is
+#     reached.
+#   - velocity-init spawns `<script> start` with no RC_SVCNAME and
+#     tracks the child directly, so the start case execs the loop in
+#     the foreground. (If a start command returns 0, velocity treats
+#     the service as daemonized and never restarts it — we want the
+#     loop itself to be the tracked child.)
+#
+# Dependency headers are deliberately empty: no Required-Start, so
+# OpenRC starts it unconditionally in `default` and velocity-init puts
+# it in the first startup level.
+### BEGIN INIT INFO
+# Provides:          bench-svc
+# Required-Start:
+# Required-Stop:
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: Benchmark mock service (idle supervised process)
+### END INIT INFO
+
+READY=/tmp/bench-svc.ready
+PIDFILE=/run/bench-svc.pid
+
+case "$1" in
+  start)
+    if [ -n "${RC_SVCNAME:-}" ]; then
+      # OpenRC: daemonize + pidfile, then wait for the ready marker so
+      # the service is not reported started before the workload runs.
+      /usr/libexec/bench-svc-run &
+      echo $! > "$PIDFILE"
+      i=0
+      while [ ! -f "$READY" ] && [ "$i" -lt 100 ]; do
+        sleep 0.05
+        i=$((i + 1))
+      done
+    else
+      # velocity-init: stay in the foreground as the tracked child.
+      exec /usr/libexec/bench-svc-run
+    fi
+    ;;
+  stop)
+    # OpenRC calls the stop function; the supervisor (velocity-init)
+    # never runs this — it SIGTERMs the process group directly.
+    # bench-svc-run's SIGTERM trap removes the markers and exits 0.
+    if [ -f "$PIDFILE" ]; then
+      kill "$(cat "$PIDFILE")" 2>/dev/null || true
+    fi
+    ;;
+esac

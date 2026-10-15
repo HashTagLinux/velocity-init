@@ -1,0 +1,7 @@
+# Shared fstab for the benchmark image.
+#
+# Deliberately minimal: one tiny tmpfs proves the mount phase for
+# velocity-init (PID 1) and keeps OpenRC's fsck/localmount services
+# from scanning a heavyweight fstab. A Debian container's default
+# /etc/fstab can make fsck or swap services slow or hang.
+tmpfs /var/run-bench tmpfs size=1m,mode=0750 0 0

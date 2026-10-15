@@ -1,0 +1,4 @@
+#!/bin/sh
+# SysV fixture: a supervised respawn line (stands in for agetty).
+echo "fixture getty on $*"
+sleep 3600
