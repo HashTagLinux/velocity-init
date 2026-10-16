@@ -67,7 +67,34 @@ fn test_sd_notify_readiness_unblocks_boot() {
 #[test]
 fn test_socket_activation_handoff_and_listen() {
     let _e2e_lock = acquire_e2e_lock();
-    let mut proc = TestProc::spawn(&data_root().join("data_sock"));
+
+    // The fixture names its unix socket as an absolute path. Run it
+    // from a fresh per-run copy under `target/` with the path repointed
+    // there: a fixed global path (this used to be a literal
+    // /tmp/velocity-sockd.sock) turns any leftover — e.g. a root-owned
+    // file a previous test run left behind that this user cannot
+    // unlink — into EADDRINUSE, one fewer inherited fd, and a failure
+    // that has nothing to do with the code under test.
+    let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join(format!("data_sock-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create data_sock dir");
+    let script = std::fs::read_to_string(data_root().join("data_sock").join("sockd"))
+        .expect("read sockd fixture");
+    let patched = script.replace(
+        "/tmp/velocity-sockd.sock",
+        dir.join("velocity-sockd.sock").to_str().expect("utf-8 path"),
+    );
+    let sockd = dir.join("sockd");
+    std::fs::write(&sockd, patched).expect("write patched sockd");
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&sockd, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod sockd");
+    }
+
+    let mut proc = TestProc::spawn(&dir);
 
     let port = loop {
         if let Some(p) = find_port(&proc.snapshot()) {
@@ -120,6 +147,8 @@ fn test_socket_activation_handoff_and_listen() {
     proc.terminate();
     let code = proc.wait_exit(Duration::from_secs(10)).expect("exited");
     assert_eq!(code, 0);
+
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

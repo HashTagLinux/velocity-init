@@ -5,11 +5,100 @@ use nix::unistd::getpid;
 
 const UT_RUN_LVL: i16 = 1;
 
+/// `BOOT_TIME` in `utmpx.h`: the "system booted" record.
+const UT_BOOT_TIME: i16 = 2;
+
 const UT_ID_SYSV: &[u8] = b"~~";
 
 const PREV_NONE: u8 = b'N';
 
 pub const DEFAULT_UTMP_PATH: &str = "/var/run/utmp";
+
+/// The width of the record's tail fields (`ut_session`, `ut_tv`).
+///
+/// glibc's utmp record comes in two shapes and the file must match the
+/// shape the *system's* tools use: the 32-bit-compat one (`int32` tail,
+/// 384-byte records) on x86 and x86_64, and the time64 one (64-bit tail,
+/// 400-byte records) on arm64 and armhf — armhf since its time64
+/// transition (`_TIME_BITS=64`, as current distro builds ship it).
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+type UtmpTail = i32;
+
+#[cfg(any(target_arch = "aarch64", target_arch = "arm"))]
+type UtmpTail = i64;
+
+#[cfg(not(any(
+    target_arch = "x86",
+    target_arch = "x86_64",
+    target_arch = "aarch64",
+    target_arch = "arm"
+)))]
+compile_error!(
+    "no utmp record layout is pinned for this target; check glibc's \
+     bits/utmp.h, then add the arch to the UtmpTail cfgs in src/utmp.rs"
+);
+
+/// One record of the on-disk Linux utmp database (`utmpx` flavour).
+///
+/// velocity-init writes `/var/run/utmp` for the *system's* tools
+/// (`runlevel`, `who -r`), so the bytes must match what those tools use —
+/// glibc's layout — whatever libc this binary was built against.
+/// `libc::utmpx` cannot promise that portably: glibc itself has two
+/// record shapes (384 bytes with the compat tail on x86/x86_64, 400 with
+/// the time64 tail on arm64 and friends), and musl models only the time64
+/// one — 400 bytes on x86_64, where Devuan's tools read 384. So the
+/// record is spelled out here for the arches Devuan ships, taken from
+/// glibc's `bits/utmp.h`, and pinned by the size/offset tests below; a
+/// build whose layout drifts fails loudly instead of writing a database
+/// nothing can read.
+#[allow(dead_code)] // pins the byte layout; some fields are never read
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct UtmpRecord {
+    ut_type: i16,
+    /// Padding that keeps `ut_pid` 4-aligned (part of both layouts).
+    _ut_pad: i16,
+    ut_pid: i32,
+    ut_line: [u8; 32],
+    ut_id: [u8; 4],
+    ut_user: [u8; 32],
+    ut_host: [u8; 256],
+    /// `struct exit_status` (never inspected).
+    _ut_exit: [i16; 2],
+    ut_session: UtmpTail,
+    ut_tv_sec: UtmpTail,
+    _ut_tv_usec: UtmpTail,
+    _ut_addr_v6: [u8; 16],
+    _ut_reserved: [u8; 20],
+}
+
+/// The record is the file format: it must be exactly one of glibc's
+/// two sizes, or every read/write is off the rails.
+const _: () = assert!(
+    std::mem::size_of::<UtmpRecord>() == 384 || std::mem::size_of::<UtmpRecord>() == 400
+);
+
+impl UtmpRecord {
+    /// The record as it appears in the file.
+    fn as_bytes(&self) -> &[u8] {
+        // SAFETY: `UtmpRecord` is `repr(C)` plain-old-data with no
+        // references; every byte is part of the on-disk format.
+        unsafe {
+            std::slice::from_raw_parts(
+                (self as *const UtmpRecord) as *const u8,
+                std::mem::size_of::<Self>(),
+            )
+        }
+    }
+
+    /// Decode one record from a buffer holding at least its size.
+    fn from_bytes(bytes: &[u8]) -> Self {
+        // SAFETY: plain-old-data, and callers only pass per-record
+        // chunks (`size_of::<Self>()` bytes; see `read_runlevel` and
+        // `find_record_offset`), so the unaligned read stays in bounds.
+        unsafe { std::ptr::read_unaligned(bytes.as_ptr() as *const UtmpRecord) }
+    }
+}
 
 pub fn utmp_path() -> String {
     utmp_path_with(|key| std::env::var(key).ok())
@@ -57,13 +146,12 @@ impl Default for RunLevel {
 
 pub fn read_runlevel(path: &str) -> Option<RunLevel> {
     let data = std::fs::read(path).ok()?;
-    let entry_size = std::mem::size_of::<libc::utmpx>();
+    let entry_size = std::mem::size_of::<UtmpRecord>();
     let mut last: Option<RunLevel> = None;
     let mut i = 0;
     while i + entry_size <= data.len() {
         let chunk = &data[i..i + entry_size];
-        let u: libc::utmpx =
-            unsafe { std::ptr::read_unaligned(chunk.as_ptr() as *const libc::utmpx) };
+        let u = UtmpRecord::from_bytes(chunk);
         i += entry_size;
         if u.ut_type == UT_RUN_LVL {
             if let Some(rl) = decode_runlevel(&u) {
@@ -74,11 +162,9 @@ pub fn read_runlevel(path: &str) -> Option<RunLevel> {
     last
 }
 
-fn decode_runlevel(u: &libc::utmpx) -> Option<RunLevel> {
+fn decode_runlevel(u: &UtmpRecord) -> Option<RunLevel> {
 
-    let is_sysv = u.ut_user[0] as u8 == b'r'
-        && u.ut_user[1] as u8 == b'u'
-        && u.ut_user[2] as u8 == b'n';
+    let is_sysv = u.ut_user[0] == b'r' && u.ut_user[1] == b'u' && u.ut_user[2] == b'n';
     if is_sysv {
         let pid = u.ut_pid;
         if pid <= 0 {
@@ -95,8 +181,8 @@ fn decode_runlevel(u: &libc::utmpx) -> Option<RunLevel> {
         });
     }
 
-    let prev = u.ut_user[0] as u8;
-    let curr = u.ut_host[0] as u8;
+    let prev = u.ut_user[0];
+    let curr = u.ut_host[0];
     if curr == 0 {
         return None;
     }
@@ -202,27 +288,29 @@ pub fn write_boot_time_record_to(utmp: &std::path::Path) -> io::Result<()> {
     if let Some(parent) = utmp.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let mut u: libc::utmpx = unsafe { std::mem::zeroed() };
-    u.ut_type = libc::BOOT_TIME as libc::c_short;
+    let mut u: UtmpRecord = unsafe { std::mem::zeroed() };
+    u.ut_type = UT_BOOT_TIME;
     u.ut_pid = 0;
 
     for (i, b) in b"~~".iter().enumerate() {
-        u.ut_id[i] = *b as libc::c_char;
+        u.ut_id[i] = *b;
     }
-    u.ut_line[0] = b'~' as libc::c_char;
+    u.ut_line[0] = b'~';
     for (i, b) in b"reboot".iter().enumerate() {
-        u.ut_user[i] = *b as libc::c_char;
+        u.ut_user[i] = *b;
     }
     fill_ut_host(&mut u);
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i32)
+        .map(|d| d.as_secs())
         .unwrap_or(0);
-    u.ut_tv.tv_sec = now;
-    put_or_append(utmp, u, libc::BOOT_TIME as libc::c_short, UT_ID_SYSV)
+    // The compat layout carries a 32-bit `tv_sec` (the y2038 wrap is
+    // part of that on-disk format); the time64 layout carries 64.
+    u.ut_tv_sec = now as UtmpTail;
+    put_or_append(utmp, u, UT_BOOT_TIME, UT_ID_SYSV)
 }
 
-fn fill_ut_host(u: &mut libc::utmpx) {
+fn fill_ut_host(u: &mut UtmpRecord) {
 
     let mut uts: libc::utsname = unsafe { std::mem::zeroed() };
 
@@ -234,7 +322,7 @@ fn fill_ut_host(u: &mut libc::utmpx) {
         std::ffi::CStr::from_ptr(uts.release.as_ptr())
     };
     for (i, b) in release.to_bytes().iter().enumerate().take(u.ut_host.len()) {
-        u.ut_host[i] = *b as libc::c_char;
+        u.ut_host[i] = *b;
     }
 }
 
@@ -254,37 +342,37 @@ pub fn write_record_to(
     }
 
     let prev = previous.unwrap_or(PREV_NONE);
-    let mut u: libc::utmpx = unsafe { std::mem::zeroed() };
+    let mut u: UtmpRecord = unsafe { std::mem::zeroed() };
     u.ut_type = UT_RUN_LVL;
-    u.ut_pid = next as libc::pid_t + 256 * prev as libc::pid_t;
+    u.ut_pid = next as i32 + 256 * prev as i32;
 
     for (i, b) in UT_ID_SYSV.iter().enumerate() {
-        u.ut_id[i] = *b as libc::c_char;
+        u.ut_id[i] = *b;
     }
-    u.ut_line[0] = b'~' as libc::c_char;
+    u.ut_line[0] = b'~';
     for (i, b) in b"runlevel".iter().enumerate() {
-        u.ut_user[i] = *b as libc::c_char;
+        u.ut_user[i] = *b;
     }
     fill_ut_host(&mut u);
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i32)
+        .map(|d| d.as_secs())
         .unwrap_or(0);
-    u.ut_tv.tv_sec = now;
+    u.ut_tv_sec = now as UtmpTail;
 
     put_or_append(utmp, u, UT_RUN_LVL, UT_ID_SYSV)
 }
 
 fn put_or_append(
     path: &std::path::Path,
-    record: libc::utmpx,
-    ut_type: libc::c_short,
+    record: UtmpRecord,
+    ut_type: i16,
     id: &[u8],
 ) -> io::Result<()> {
     use std::io::{Seek, SeekFrom, Write};
     use std::os::fd::AsRawFd;
 
-    let entry_size = std::mem::size_of::<libc::utmpx>() as u64;
+    let entry_size = std::mem::size_of::<UtmpRecord>() as u64;
     let mut f = std::fs::OpenOptions::new()
         .create(true)
         .read(true)
@@ -293,12 +381,7 @@ fn put_or_append(
 
     let offset = find_record_offset(&mut f, ut_type, id, entry_size)?;
 
-    let bytes = unsafe {
-        std::slice::from_raw_parts(
-            (&record as *const libc::utmpx) as *const u8,
-            std::mem::size_of::<libc::utmpx>(),
-        )
-    };
+    let bytes = record.as_bytes();
     match offset {
         Some(off) => f.seek(SeekFrom::Start(off))?,
 
@@ -312,7 +395,7 @@ fn put_or_append(
 
 fn find_record_offset(
     f: &mut std::fs::File,
-    ut_type: libc::c_short,
+    ut_type: i16,
     id: &[u8],
     entry_size: u64,
 ) -> io::Result<Option<u64>> {
@@ -327,7 +410,7 @@ fn find_record_offset(
             Err(e) => return Err(e),
         }
 
-        let u: libc::utmpx = unsafe { std::ptr::read_unaligned(buf.as_ptr() as *const libc::utmpx) };
+        let u = UtmpRecord::from_bytes(&buf);
         if u.ut_type == ut_type && id_matches(&u.ut_id, id) {
             return Ok(Some(off));
         }
@@ -335,11 +418,11 @@ fn find_record_offset(
     }
 }
 
-fn id_matches(field: &[libc::c_char], id: &[u8]) -> bool {
+fn id_matches(field: &[u8], id: &[u8]) -> bool {
     field
         .iter()
         .zip(id)
-        .all(|(c, b)| *c as u8 == *b)
+        .all(|(c, b)| c == b)
         && field.get(id.len()).is_some_and(|c| *c == 0)
 }
 
@@ -347,51 +430,48 @@ fn id_matches(field: &[libc::c_char], id: &[u8]) -> bool {
 mod tests {
     use super::*;
 
-    fn fake_record(prev: u8, cur: u8, path: &str) {
-        let mut u: libc::utmpx = unsafe { std::mem::zeroed() };
-        u.ut_type = UT_RUN_LVL;
-        u.ut_pid = cur as libc::pid_t + 256 * prev as libc::pid_t;
-        u.ut_id[0] = b'~' as libc::c_char;
-        u.ut_id[1] = b'~' as libc::c_char;
-        u.ut_line[0] = b'~' as libc::c_char;
-        for (i, b) in b"runlevel".iter().enumerate() {
-            u.ut_user[i] = *b as libc::c_char;
-        }
-        let tmp = std::env::temp_dir().join(path);
-        let bytes = unsafe {
-            std::slice::from_raw_parts(
-                (&u as *const libc::utmpx) as *const u8,
-                std::mem::size_of::<libc::utmpx>(),
-            )
-        };
-        std::fs::write(&tmp, bytes).unwrap();
+    /// Write a synthetic record to a unique per-test path and return it.
+    ///
+    /// The path is unique (test name + pid), so a stale file from an
+    /// earlier run — possibly owned by another user — can never make the
+    /// test fail with `PermissionDenied`, and parallel test binaries
+    /// cannot collide. Callers remove the file when done.
+    fn write_fake_record(u: &UtmpRecord, name: &str) -> std::path::PathBuf {
+        let path = scratch(name);
+        std::fs::write(&path, u.as_bytes()).unwrap();
+        path
     }
 
-    fn fake_legacy_record(prev: u8, cur: u8, path: &str) {
-        let mut u: libc::utmpx = unsafe { std::mem::zeroed() };
+    fn fake_record(prev: u8, cur: u8, name: &str) -> std::path::PathBuf {
+        let mut u: UtmpRecord = unsafe { std::mem::zeroed() };
+        u.ut_type = UT_RUN_LVL;
+        u.ut_pid = cur as i32 + 256 * prev as i32;
+        u.ut_id[0] = b'~';
+        u.ut_id[1] = b'~';
+        u.ut_line[0] = b'~';
+        for (i, b) in b"runlevel".iter().enumerate() {
+            u.ut_user[i] = *b;
+        }
+        write_fake_record(&u, name)
+    }
+
+    fn fake_legacy_record(prev: u8, cur: u8, name: &str) -> std::path::PathBuf {
+        let mut u: UtmpRecord = unsafe { std::mem::zeroed() };
         u.ut_type = UT_RUN_LVL;
         u.ut_pid = 1;
-        u.ut_id[0] = b'r' as libc::c_char;
-        u.ut_id[1] = b'l' as libc::c_char;
-        u.ut_user[0] = prev as libc::c_char;
+        u.ut_id[0] = b'r';
+        u.ut_id[1] = b'l';
+        u.ut_user[0] = prev;
         u.ut_user[1] = 0;
-        u.ut_host[0] = cur as libc::c_char;
+        u.ut_host[0] = cur;
         u.ut_host[1] = 0;
-        let tmp = std::env::temp_dir().join(path);
-        let bytes = unsafe {
-            std::slice::from_raw_parts(
-                (&u as *const libc::utmpx) as *const u8,
-                std::mem::size_of::<libc::utmpx>(),
-            )
-        };
-        std::fs::write(&tmp, bytes).unwrap();
+        write_fake_record(&u, name)
     }
 
     #[test]
     fn read_runlevel_finds_last_record() {
-        let p1 = "velocity-utmp-test-1";
-        fake_record(b'N', b'2', p1);
-        let rl = read_runlevel(std::env::temp_dir().join(p1).to_str().unwrap()).unwrap();
+        let p1 = fake_record(b'N', b'2', "last-a");
+        let rl = read_runlevel(p1.to_str().unwrap()).unwrap();
         assert_eq!(
             rl,
             RunLevel {
@@ -400,9 +480,8 @@ mod tests {
             }
         );
 
-        let p2 = "velocity-utmp-test-2";
-        fake_record(b'2', b'3', p2);
-        let rl2 = read_runlevel(std::env::temp_dir().join(p2).to_str().unwrap()).unwrap();
+        let p2 = fake_record(b'2', b'3', "last-b");
+        let rl2 = read_runlevel(p2.to_str().unwrap()).unwrap();
         assert_eq!(
             rl2,
             RunLevel {
@@ -410,6 +489,9 @@ mod tests {
                 current: '3'
             }
         );
+
+        let _ = std::fs::remove_file(&p1);
+        let _ = std::fs::remove_file(&p2);
     }
 
     #[test]
@@ -506,7 +588,7 @@ mod tests {
         write_record_to(&path, Some(b'2'), b'3').unwrap();
         write_record_to(&path, Some(b'3'), b'5').unwrap();
 
-        let size = std::mem::size_of::<libc::utmpx>();
+        let size = std::mem::size_of::<UtmpRecord>();
         let len = std::fs::metadata(&path).unwrap().len();
         assert_eq!(
             len,
@@ -536,19 +618,16 @@ mod tests {
         write_boot_time_record_to(&path).unwrap();
         write_boot_time_record_to(&path).unwrap();
 
-        let size = std::mem::size_of::<libc::utmpx>();
+        let size = std::mem::size_of::<UtmpRecord>();
         assert_eq!(std::fs::metadata(&path).unwrap().len(), size as u64);
         let data = std::fs::read(&path).unwrap();
-        let u: libc::utmpx =
-            unsafe { std::ptr::read_unaligned(data.as_ptr() as *const libc::utmpx) };
-        assert_eq!(u.ut_type, libc::BOOT_TIME as libc::c_short);
-        assert!(u.ut_tv.tv_sec > 1_700_000_000, "a real timestamp");
+        let u = UtmpRecord::from_bytes(&data);
+        assert_eq!(u.ut_type, UT_BOOT_TIME);
+        assert!(u.ut_tv_sec > 1_700_000_000, "a real timestamp");
 
-        let id: Vec<u8> = u.ut_id[..2].iter().map(|c| *c as u8).collect();
-        assert_eq!(id, b"~~");
-        assert_eq!(u.ut_line[0] as u8, b'~');
-        let user: Vec<u8> = u.ut_user[..6].iter().map(|c| *c as u8).collect();
-        assert_eq!(user, b"reboot");
+        assert_eq!(&u.ut_id[..2], b"~~");
+        assert_eq!(u.ut_line[0], b'~');
+        assert_eq!(&u.ut_user[..6], b"reboot");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -560,15 +639,12 @@ mod tests {
         let path = dir.join("utmp");
         write_record_to(&path, Some(b'N'), b'2').unwrap();
         let data = std::fs::read(&path).unwrap();
-        let u: libc::utmpx =
-            unsafe { std::ptr::read_unaligned(data.as_ptr() as *const libc::utmpx) };
-        assert_eq!(u.ut_pid, b'2' as libc::pid_t + 256 * b'N' as libc::pid_t);
-        let id: Vec<u8> = u.ut_id[..2].iter().map(|c| *c as u8).collect();
-        assert_eq!(id, b"~~");
-        assert_eq!(u.ut_line[0] as u8, b'~');
-        let user: Vec<u8> = u.ut_user[..8].iter().map(|c| *c as u8).collect();
-        assert_eq!(user, b"runlevel");
-        assert!(u.ut_tv.tv_sec > 1_700_000_000, "RUN_LVL carries a timestamp");
+        let u = UtmpRecord::from_bytes(&data);
+        assert_eq!(u.ut_pid, b'2' as i32 + 256 * b'N' as i32);
+        assert_eq!(&u.ut_id[..2], b"~~");
+        assert_eq!(u.ut_line[0], b'~');
+        assert_eq!(&u.ut_user[..8], b"runlevel");
+        assert!(u.ut_tv_sec > 1_700_000_000, "RUN_LVL carries a timestamp");
 
         assert_eq!(
             read_runlevel(path.to_str().unwrap()),
@@ -580,24 +656,24 @@ mod tests {
     #[test]
     fn legacy_user_host_records_still_decode() {
 
-        let p = "velocity-utmp-legacy-compat";
-        fake_legacy_record(b'2', b'3', p);
+        let p = fake_legacy_record(b'2', b'3', "legacy-compat");
         assert_eq!(
-            read_runlevel(std::env::temp_dir().join(p).to_str().unwrap()),
+            read_runlevel(p.to_str().unwrap()),
             Some(RunLevel { previous: '2', current: '3' })
         );
+        let _ = std::fs::remove_file(&p);
     }
 
     #[test]
     fn zero_levels_decode_sensibly() {
 
-        let p = "velocity-utmp-zero-prev";
-        fake_record(0, b'2', p);
+        let p = fake_record(0, b'2', "zero-prev");
         assert_eq!(
-            read_runlevel(std::env::temp_dir().join(p).to_str().unwrap()),
+            read_runlevel(p.to_str().unwrap()),
             Some(RunLevel { previous: 'N', current: '2' })
         );
         assert_eq!(RunLevel::default().previous, 'N');
+        let _ = std::fs::remove_file(&p);
     }
 
     #[test]
@@ -617,5 +693,32 @@ mod tests {
         let empty: HashMap<String, String> = HashMap::new();
         assert!(!writes_allowed_with(lookup_of(&empty), 4242));
         assert!(!runlevel_write_allowed_with(lookup_of(&empty), 4242));
+    }
+
+    #[test]
+    fn record_layout_matches_the_glibc_utmp_file_format() {
+        use std::mem::{offset_of, size_of};
+
+        // Everything up to `ut_session` is shared by glibc's two layouts.
+        assert_eq!(offset_of!(UtmpRecord, ut_type), 0);
+        assert_eq!(offset_of!(UtmpRecord, ut_pid), 4);
+        assert_eq!(offset_of!(UtmpRecord, ut_line), 8);
+        assert_eq!(offset_of!(UtmpRecord, ut_id), 40);
+        assert_eq!(offset_of!(UtmpRecord, ut_user), 44);
+        assert_eq!(offset_of!(UtmpRecord, ut_host), 76);
+        assert_eq!(offset_of!(UtmpRecord, _ut_exit), 332);
+
+        // The tail is where the layouts diverge — same arch split as the
+        // `UtmpTail` alias.
+        const TIME64: bool = cfg!(any(target_arch = "aarch64", target_arch = "arm"));
+        if TIME64 {
+            assert_eq!(size_of::<UtmpRecord>(), 400, "time64 layout");
+            assert_eq!(offset_of!(UtmpRecord, ut_tv_sec), 344);
+            assert_eq!(offset_of!(UtmpRecord, _ut_addr_v6), 360);
+        } else {
+            assert_eq!(size_of::<UtmpRecord>(), 384, "32-bit-compat layout");
+            assert_eq!(offset_of!(UtmpRecord, ut_tv_sec), 340);
+            assert_eq!(offset_of!(UtmpRecord, _ut_addr_v6), 348);
+        }
     }
 }

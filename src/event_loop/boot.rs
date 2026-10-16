@@ -105,7 +105,10 @@ impl super::EventLoop {
     pub(crate) fn sysv_boot(&mut self) {
         self.boot_started_at = Some(std::time::Instant::now());
         let (names, async_boot): (Vec<String>, std::collections::HashSet<String>) = {
-            let ctx = self.sysv.as_ref().expect("sysv mode wraps sysv_boot");
+            let Some(ctx) = self.sysv.as_ref() else {
+                warn!("sysv_boot called without a sysv context — skipping sysv boot");
+                return;
+            };
             // boot lines, then wait lines, in order
             let names = ctx
                 .boot_names

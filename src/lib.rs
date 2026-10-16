@@ -9,6 +9,7 @@ pub mod journal;
 pub mod lsb_parser;
 pub mod models;
 pub mod mounts;
+pub mod namespaces;
 pub mod paths;
 pub mod supervisor;
 pub mod utmp;

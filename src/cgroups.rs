@@ -35,6 +35,20 @@ fn validate_service_name(service_name: &str) -> io::Result<()> {
     Ok(())
 }
 
+/// cgroup control files are flat, plain files directly under the cgroup
+/// directory (`memory.max`, `cpu.max`, ...). A limit key coming from an
+/// init script's LSB header must therefore be a single path component:
+/// anything containing `/` (absolute paths, `..` traversal), or a NUL,
+/// would make `dir.join(file)` read/write outside the service cgroup —
+/// from PID 1, i.e. as root.
+fn validate_limit_file(file: &str) -> bool {
+    !file.is_empty()
+        && file != "."
+        && file != ".."
+        && !file.contains('/')
+        && !file.contains('\0')
+}
+
 fn enable_controllers(dir: &Path) -> io::Result<()> {
     const EPERM: i32 = 1;
     const ENOENT: i32 = 2;
@@ -113,6 +127,12 @@ pub fn apply_limits(service_name: &str, limits: &HashMap<String, String>) {
     let mut files: Vec<&String> = limits.keys().collect();
     files.sort();
     for file in files {
+        if !validate_limit_file(file) {
+            warn!(
+                "refusing to apply limit with non-plain file name {file:?} for {service_name}"
+            );
+            continue;
+        }
         let value = limit_value(file, &limits[file]);
         match fs::write(dir.join(file), format!("{}\n", value)) {
             Ok(()) => debug!(
@@ -348,5 +368,37 @@ mod tests {
         assert!(read_cgroup_pids("../escape").is_err());
 
         apply_limits("../escape", &limits);
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("velocity-cgroups-{}-{name}", std::process::id()))
+    }
+
+    #[test]
+    fn test_validate_limit_file_accepts_only_plain_names() {
+        for ok in ["memory.max", "cpu.max", "pids.max", "io.max"] {
+            assert!(validate_limit_file(ok), "{ok}");
+        }
+        for bad in ["", ".", "..", "/", "/etc/passwd", "a/b", "../x", "a\0b"] {
+            assert!(!validate_limit_file(bad), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn test_apply_limits_never_writes_outside_the_cgroup() {
+        // `apply_limits` joins each limit key onto the service cgroup
+        // dir: an absolute key would replace that base entirely and a
+        // `..` walk would climb out of it, handing an init script's
+        // header root-write access to arbitrary paths. Use a temp file
+        // we own as the would-be escape target and prove it stays gone.
+        let target = scratch("escape");
+        let _ = std::fs::remove_file(&target);
+        let mut limits = HashMap::new();
+        limits.insert(target.display().to_string(), "boom".to_string());
+        limits.insert("../../etc/velocity-escape".to_string(), "boom".to_string());
+
+        apply_limits("ssh", &limits);
+
+        assert!(!target.exists(), "limit key escaped the cgroup dir");
     }
 }

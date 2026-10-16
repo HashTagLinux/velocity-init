@@ -401,13 +401,16 @@ impl super::EventLoop {
                 ShutdownAction::Reboot => "6",
                 _ => "0",
             };
-            let teardown_names: Vec<String> = {
-                let ctx = self.sysv.as_ref().expect("checked above");
-                ctx.shutdown_names
+            let teardown_names: Vec<String> = match self.sysv.as_ref() {
+                Some(ctx) => ctx
+                    .shutdown_names
                     .iter()
                     .chain(ctx.wait_services(target).iter())
                     .cloned()
-                    .collect()
+                    .collect(),
+                // Unreachable while the guard above holds; an empty list
+                // is a no-op teardown, never a panic in PID 1.
+                None => Vec::new(),
             };
             self.ensure_sysv_services(&teardown_names, crate::models::RestartPolicy::NoRestart);
             for name in &teardown_names {

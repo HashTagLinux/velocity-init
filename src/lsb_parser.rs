@@ -126,12 +126,15 @@ pub fn parse_str(content: &str) -> Result<LsbHeader, ParseError> {
 pub fn parse_header(file_path: &Path) -> Result<LsbHeader, ParseError> {
 
     let mut file = File::open(file_path).map_err(ParseError::Io)?;
-    let mut content = String::new();
+    let mut bytes = Vec::new();
     file.by_ref()
         .take(MAX_SCRIPT_READ)
-        .read_to_string(&mut content)
+        .read_to_end(&mut bytes)
         .map_err(ParseError::Io)?;
-    parse_str(&content)
+    // Lossy, like `inittab::parse`: the size cap can slice a multi-byte
+    // character in half at the boundary, and one truncated byte far
+    // past the header must not cost us the header (nor fail the boot).
+    parse_str(&String::from_utf8_lossy(&bytes))
 }
 
 #[cfg(test)]
@@ -426,6 +429,28 @@ mod tests {
         let mut open = String::from("### BEGIN INIT INFO\n");
         open.push_str(&"# x: y\n".repeat(10_000));
         assert!(matches!(parse_str(&open), Err(ParseError::NoHeader)));
+    }
+
+    #[test]
+    fn test_truncation_boundary_keeps_the_header() {
+        // The 1 MiB read cap may slice a multi-byte character in half:
+        // `é` (2 bytes) with its second byte past the boundary must not
+        // turn into an `InvalidData` error that loses the header.
+        let mut script =
+            String::from("### BEGIN INIT INFO\n# Provides: boundary\n### END INIT INFO\n");
+        let pad = MAX_SCRIPT_READ as usize - 1 - script.len();
+        script.push_str(&"a".repeat(pad));
+        script.push('é');
+
+        let path = std::env::temp_dir().join(format!(
+            "velocity-lsb-boundary-{}",
+            std::process::id()
+        ));
+        std::fs::write(&path, &script).expect("write scratch script");
+        let h = parse_header(&path).expect("a split character must not lose the header");
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(h.provides, vec!["boundary"]);
     }
 
     #[test]

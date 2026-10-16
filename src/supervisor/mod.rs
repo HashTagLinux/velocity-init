@@ -14,7 +14,9 @@
 //!   `[service]` prefix, so daemons don't scribble on the console.
 //! - **Exponential backoff** — a service that exits non-zero (or is
 //!   killed by a signal) gets a restart scheduled on a per-service
-//!   `timerfd`: 1s, 2s, 4s, 8s, 16s, capped at 30s. The counter resets
+//!   `timerfd`: 100ms, 200ms, 400ms, ... doubling, capped at 30s. The
+//!   first retry is almost immediate, matching systemd's `RestartSec`
+//!   default (100 ms) and dinit's no-delay default. The counter resets
 //!   after the service stays up for `STABLE_RUNNING_SECS` seconds.
 //! - **SysV daemonising** — SysV scripts typically fork a daemon and
 //!   exit `0` immediately. We treat a quick, clean exit `0` as
@@ -51,8 +53,11 @@ pub mod stop;
 
 // ────────────────────── backoff parameters ───────────────────────────
 
-/// First restart delay (milliseconds).
-pub const BACKOFF_BASE_MS: u64 = 1000;
+/// First restart delay (milliseconds). A first retry that is almost
+/// immediate, then doubling: systemd defaults to 100 ms (`RestartSec`)
+/// and dinit to none at all; the previous 1 s first attempt left a
+/// crashed default service down longer than any comparable supervisor.
+pub const BACKOFF_BASE_MS: u64 = 100;
 /// Hard cap on the restart delay (milliseconds).
 pub const BACKOFF_CAP_MS: u64 = 30_000;
 /// A service is considered "stable" after running this long, which
@@ -61,14 +66,14 @@ pub const STABLE_RUNNING_SECS: u64 = 10;
 
 /// Compute the exponential backoff delay for a given restart attempt.
 ///
-/// attempt 1 → 1s, 2 → 2s, 3 → 4s, 4 → 8s, 5 → 16s, >= 6 → 30s.
+/// attempt 1 → 100ms, 2 → 200ms, 3 → 400ms, ... doubling, >= 10 → 30s.
 /// attempt 0 cannot happen (attempts start at 1) but maps to the base
 /// delay rather than panicking or underflowing.
 pub fn backoff_delay_ms(attempts: u32) -> u64 {
-    // 2^5 * 1000 = 32_000 already exceeds the cap, so exponents above 5
+    // 2^9 * 100 = 51_200 already exceeds the cap, so exponents above 9
     // all saturate to BACKOFF_CAP_MS; clamping here keeps the shift
     // infallible without a checked_shl/unwrap_or dance.
-    let exp = attempts.saturating_sub(1).min(5);
+    let exp = attempts.saturating_sub(1).min(9);
     BACKOFF_BASE_MS.saturating_mul(1u64 << exp).min(BACKOFF_CAP_MS)
 }
 
@@ -780,8 +785,10 @@ mod tests {
 
     #[test]
     fn test_backoff_sequence() {
-        // 1s, 2s, 4s, 8s, 16s, then capped at 30s.
-        let expected = [1000, 2000, 4000, 8000, 16000, 30000, 30000];
+        // 100ms, 200ms, 400ms, ... doubling, then capped at 30s.
+        let expected = [
+            100, 200, 400, 800, 1600, 3200, 6400, 12800, 25600, 30000, 30000,
+        ];
         for (i, want) in expected.iter().enumerate() {
             assert_eq!(backoff_delay_ms(i as u32 + 1), *want, "attempt {}", i + 1);
         }
@@ -790,7 +797,7 @@ mod tests {
     #[test]
     fn test_backoff_never_underflows() {
         // attempt 0 (shouldn't happen, but must not panic).
-        assert_eq!(backoff_delay_ms(0), 1000);
+        assert_eq!(backoff_delay_ms(0), 100);
         // a huge counter must saturate, not overflow.
         assert_eq!(backoff_delay_ms(u32::MAX), 30000);
     }

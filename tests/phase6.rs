@@ -243,7 +243,7 @@ fn test_boot_line_does_not_stall_the_boot() {
     let sock = socket_path("bootasync");
     let inittab = data_root().join("data_sysv_bootasync").join("inittab");
 
-    let mut proc = TestProc::spawn_spec(
+    let proc = TestProc::spawn_spec(
         &data_root().join("data_ctl"),
         &SpawnSpec::new()
             .socket(&sock)

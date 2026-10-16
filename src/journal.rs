@@ -179,7 +179,7 @@ impl Journal {
         buf.extend_from_slice(message);
 
         let rotation_error = {
-            let mut f = self.file.lock().unwrap();
+            let mut f = self.file.lock().unwrap_or_else(|e| e.into_inner());
 
             #[cfg(test)]
             let _reentrancy = lock_probe::Guard::enter();
@@ -195,7 +195,7 @@ impl Journal {
 
             warn!("journal rotation failed ({}); continuing", e);
         }
-        let mut f = self.file.lock().unwrap();
+        let mut f = self.file.lock().unwrap_or_else(|e| e.into_inner());
         f.write_all(&buf)?;
         f.flush()
     }
@@ -391,12 +391,12 @@ impl JournalLogger {
     }
 
     pub fn path(&self) -> PathBuf {
-        self.journal.lock().unwrap().path().to_path_buf()
+        self.journal.lock().unwrap_or_else(|e| e.into_inner()).path().to_path_buf()
     }
 
     pub fn reopen(&self, path: &str) -> io::Result<()> {
         let j = Journal::open(path)?;
-        *self.journal.lock().unwrap() = j;
+        *self.journal.lock().unwrap_or_else(|e| e.into_inner()) = j;
         Ok(())
     }
 }
@@ -410,10 +410,14 @@ impl log::Log for JournalLogger {
         if !self.enabled(record.metadata()) {
             return;
         }
+        // Poison-tolerant on purpose: after a panic elsewhere, losing
+        // one record would be a shame, but panicking *inside the
+        // logger* while PID 1 handles that panic would be fatal — a
+        // torn last record is trimmed by the reader.
         let _ = self
             .journal
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .append(&Entry::from_record(record));
     }
 
@@ -437,7 +441,7 @@ impl DualLogger {
     }
 
     pub fn reopen_journal(&self, path: &str) -> io::Result<()> {
-        match self.journal.lock().unwrap().as_ref() {
+        match self.journal.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
             Some(j) => j.reopen(path),
             None => Ok(()),
         }
@@ -450,21 +454,21 @@ impl log::Log for DualLogger {
             || self
                 .journal
                 .lock()
-                .unwrap()
+                .unwrap_or_else(|e| e.into_inner())
                 .as_ref()
                 .is_some_and(|j| j.enabled(metadata))
     }
 
     fn log(&self, record: &Record) {
         self.console.log(record);
-        if let Some(j) = self.journal.lock().unwrap().as_mut() {
+        if let Some(j) = self.journal.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
             j.log(record);
         }
     }
 
     fn flush(&self) {
         self.console.flush();
-        if let Some(j) = self.journal.lock().unwrap().as_ref() {
+        if let Some(j) = self.journal.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
             j.flush();
         }
     }

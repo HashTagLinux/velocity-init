@@ -22,6 +22,15 @@ cargo build
 cargo build --release   # glibc dynamic. Build it where it'll run — docker/Dockerfile.freia works (needs glibc 2.43+)
 ```
 
+Standalone build — one static binary, no libc on the target, boots anywhere:
+
+```sh
+rustup target add x86_64-unknown-linux-musl   # (aarch64-unknown-linux-musl works too)
+cargo build --release --target x86_64-unknown-linux-musl   # ~1.2 MB, static-pie
+```
+
+Either build writes the same `/var/run/utmp` records: the on-disk layout is spelled out in `src/utmp.rs` rather than inherited from whichever libc compiled it.
+
 ## Test
 
 ```sh

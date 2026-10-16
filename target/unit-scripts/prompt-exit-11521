@@ -1,0 +1,11 @@
+#!/bin/sh
+### BEGIN INIT INFO
+# Provides: prompt-exit
+# Required-Start:
+# Required-Stop:
+# Default-Start: 2 3 4 5
+# Default-Stop: 0 1 6
+# Short-Description: unit-test service
+### END INIT INFO
+case "$1" in start) sleep 30 ;; stop) ;; esac
+exit 0

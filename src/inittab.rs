@@ -398,10 +398,10 @@ impl SysvContext {
                 suffix += 1;
             }
             for lv in l.runlevels.to_ascii_lowercase().chars() {
-                ondemand_for_level
-                    .entry(lv.to_string())
-                    .or_default()
-                    .push(unique.clone());
+                let entry = ondemand_for_level.entry(lv.to_string()).or_default();
+                if !entry.contains(&unique) {
+                    entry.push(unique.clone());
+                }
             }
 
             ondemand_name_of_line.insert(idx, unique);
@@ -550,12 +550,25 @@ impl SysvContext {
     }
 }
 
+/// Levels a line applies to, in file order, without repetitions.
+///
+/// An empty runlevel field means 0-9 (inittab(5)). A repeated character
+/// in the field (`rc:22:wait:...`) must not register the service name
+/// twice: `wait_services`/`once_services` are consumed as start lists,
+/// and a `wait` line would otherwise run its script once per repetition.
 fn levels_of(l: &Line) -> Vec<char> {
-    if l.runlevels.is_empty() {
-        "0123456789".chars().collect()
+    let raw = if l.runlevels.is_empty() {
+        "0123456789"
     } else {
-        l.runlevels.chars().collect()
+        l.runlevels.as_str()
+    };
+    let mut levels: Vec<char> = Vec::with_capacity(raw.len());
+    for c in raw.chars() {
+        if !levels.contains(&c) {
+            levels.push(c);
+        }
     }
+    levels
 }
 
 fn respawn_name(id: &str, process: &str) -> String {
@@ -894,6 +907,25 @@ pn:12345:powerokwait:/sbin/shutdown -c \"Power Restored; Shutdown Cancelled\"
                 "/etc/init.d/rc".to_string(),
             ])
         );
+    }
+
+    #[test]
+    fn test_duplicate_runlevels_do_not_duplicate_services() {
+
+        let it = Inittab::parse_str(
+            "id:2:initdefault:\n\
+             rc:22:wait:/etc/init.d/rc 2\n\
+             on:Aa:ondemand:/bin/echo on\n\
+             thrice:33:once:/bin/echo thrice\n",
+        );
+        let ctx = SysvContext::build(&it, "2");
+
+        assert_eq!(ctx.wait_services("2"), ["wait@2".to_string()]);
+
+        assert_eq!(ctx.once_services("3"), ["once@3".to_string()]);
+
+        assert_eq!(ctx.ondemand_services("a"), ["ondemand@on".to_string()]);
+        assert_eq!(ctx.ondemand_services("A").len(), 1);
     }
 
     #[test]

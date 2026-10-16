@@ -197,6 +197,12 @@ fn when_delay(when: &SWhen, unix_now: i64) -> Result<i64, String> {
 
 fn local_utc_offset_secs(unix_now: i64) -> i64 {
     unsafe {
+        // `libc::time_t` carries a deprecation warning for musl because
+        // the crate still models the pre-1.2.0 width on 32-bit musl. On
+        // the 64-bit targets velocity-init supports the widths already
+        // match (8 bytes both sides), so this stays correct; when the
+        // crate follows musl's change, this site follows with it.
+        #[allow(deprecated)]
         let t: libc::time_t = unix_now as libc::time_t;
         let mut tm: libc::tm = std::mem::zeroed();
         if libc::localtime_r(&t, &mut tm).is_null() {

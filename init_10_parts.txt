@@ -1,0 +1,205 @@
+================================================================================
+ "THIS INIT" (velocity-init, src/main.rs) DIVIDED INTO 10 PARTS
+================================================================================
+
+velocity-init is the PID 1 process: it boots the machine, starts services,
+supervises them, and shuts the machine down again. Everything below refers to
+src/main.rs, which is the entry point that ties the library modules together.
+The lifecycle splits naturally into 10 parts.
+
+--------------------------------------------------------------------------------
+PART 1 — Panic hook + PID-1 self-hardening            (main.rs, lines 151-165)
+--------------------------------------------------------------------------------
+The very first things main() does, before any real work:
+
+1. install_panic_hook() — installs a panic hook that writes straight to stderr.
+   It must not lock the journal mutexes, because a panic may have poisoned
+   them; a lock().unwrap() inside the hook would double-panic and abort.
+2. getpid() == 1 check — remembers whether we are really PID 1 (many later
+   steps behave differently, e.g. mounts and reboot).
+3. block_managed_signals() — blocks the signals the event loop manages
+   (via signalfd). If this fails, the program refuses to run as PID 1.
+4. claim_stdio() — guarantees file descriptors 0, 1 and 2 exist, reopening
+   them on /dev/console or /dev/null if the kernel handed us them closed.
+5. Writes -1000 to /proc/self/oom_score_adj — the OOM killer must never kill
+   init.
+
+Why this order: an unstable or killable PID 1 means a kernel panic, so this
+part makes init as failure-proof as possible before anything else can fail.
+
+--------------------------------------------------------------------------------
+PART 2 — CLI parsing and configuration merge          (main.rs, lines 167-201)
+--------------------------------------------------------------------------------
+Parses command line options and merges them with the environment:
+
+- parse_cli_args() handles: --dry-run, --init-dir, --inittab, --mode, --jobs,
+  --log-level, --boot-id, --version, --build-id, --info, --help.
+- Early-exit commands (--version, --build-id, --info, --help) are handled
+  immediately and return without booting; they use print_build_info(),
+  print_usage(), BUILD_ID and C_RUNTIME (helpers at lines 21-81).
+- For a normal run, RuntimeConfig::from_env() reads the environment first
+  (VELOCITY_INIT_DIR, VELOCITY_INIT_JOBS, ...), then any CLI flags override it:
+  CLI wins over environment.
+
+Why this matters: init is often started with no arguments at all by the
+kernel, so sane environment defaults plus optional CLI overrides are the only
+way to configure it.
+
+--------------------------------------------------------------------------------
+PART 3 — Logging setup (console + journal)            (main.rs, lines 203-245)
+--------------------------------------------------------------------------------
+Builds the logging pipeline used by every later part:
+
+1. A ConsoleLogger with a level filter (default "info", RUST_LOG wins).
+2. A journal opened from the candidate paths in the config
+   (Journal::open_first_available). If no journal can be opened, logging
+   degrades gracefully to console-only with a warning on stderr.
+3. Both are combined into a DualLogger, Box::leak'd so it can be registered
+   as a 'static logger, then installed with log::set_logger.
+4. The max level is set to Trace (per-call filtering happens earlier), and a
+   warning is emitted if VELOCITY_INIT_JOBS was malformed.
+
+Why this early: every later part logs its progress, so logging must exist
+before inittab parsing or service discovery.
+
+--------------------------------------------------------------------------------
+PART 4 — Inittab parsing and boot-mode selection       (main.rs, lines 247-287)
+--------------------------------------------------------------------------------
+Decides HOW the machine will boot:
+
+- Inittab::parse() reads /etc/inittab (path configurable). A missing or broken
+  inittab is not fatal: it falls back to Inittab::default() and warns.
+- Boot mode resolution (auto/native/sysv):
+    * auto  -> sysv if the inittab has content, otherwise native
+    * native -> boot the LSB dependency graph from --init-dir
+    * sysv  -> sysvinit drop-in mode (rcS / rc N, telinit, runlevels)
+- Safety gate: running sysv mode means executing this machine's /etc/init.d
+  scripts and respawning real gettys. That is only allowed as real PID 1
+  (or with VELOCITY_ALLOW_SYSV_NONPID1=1 for rescue work). Otherwise init
+  bails out with a clear error instead of trashing a running system.
+
+--------------------------------------------------------------------------------
+PART 5 — Service discovery and the dependency graph    (main.rs, lines 289-390)
+--------------------------------------------------------------------------------
+This is the planning stage; two very different branches:
+
+A) SysV branch (sysv mode with a non-empty inittab):
+   - default_level() picks the runlevel (initdefault line, else runlevel 2).
+   - SysvContext::build() prepares boot/wait/once/respawn lists.
+   - ctrlaltdel and the power-fail actions (powerfail, powerwait, powerokwait,
+     powerfailnow) are collected into action_commands so the event loop can
+     fire them later.
+
+B) Native branch:
+   - discover_services() scans the init dir (scan_init_dir skips non-files
+     and ignored names), parses each script's LSB header (lsb_parser), and
+     skips anything without a valid header.
+   - add_builtin_getty_if_missing() injects a console getty if the user has
+     no getty-like service, so there is always a login prompt.
+   - DependencyGraph::from_headers() builds the start ordering from
+     required-start / should-start relationships.
+   - detect_cycles()/break_cycles() make sure a circular dependency can never
+     make PID 1 exit (which would panic the kernel); broken edges are logged.
+   - startup_levels() computes the parallel startup "levels": all services in
+     one level can start concurrently, level N+1 waits for level N.
+
+Result: a flat startup_order plus the levels used by the event loop.
+
+--------------------------------------------------------------------------------
+PART 6 — Dry-run boot plan                            (main.rs, lines 392-432)
+--------------------------------------------------------------------------------
+If --dry-run was given, init stops here: it prints the plan and exits without
+starting anything.
+
+- SysV mode prints the runlevel and the boot/wait/once/respawn service lists.
+- Native mode prints every startup level, the numbered services in it, and
+  the socket-activated sockets each service wants, then reports
+  "Dry-run complete".
+
+Why: lets you validate an inittab or LSB graph on a normal (non-PID-1) shell
+before trusting it to boot the machine.
+
+--------------------------------------------------------------------------------
+PART 7 — PID-1 filesystem setup                       (main.rs, lines 434-456)
+--------------------------------------------------------------------------------
+Only executed when actually running as PID 1:
+
+1. mounts::setup_base_filesystems() — mounts the virtual filesystems init
+   needs (/proc, /sys, /dev, ...). Failure here is fatal, with context.
+2. claim_stdio() again, to be safe after mounts.
+3. The journal is reopened so it lives on a now-mounted filesystem.
+4. mounts::parse_fstab(DEFAULT_FSTAB) + mount_fstab_entries() mounts the
+   remaining entries from /etc/fstab; an unusable fstab is only a warning.
+
+When NOT PID 1 (e.g. running in a container for tests), this whole part is
+skipped with a log line.
+
+--------------------------------------------------------------------------------
+PART 8 — Building the runtime: supervisor, socket, loop (main.rs, lines 458-500)
+--------------------------------------------------------------------------------
+Assembles the long-running machinery:
+
+- SysV only: writes the boot time and the runlevel ('N') to utmp, so tools
+  like `who` and `last` see this boot.
+- Supervisor::new() then register() for every discovered service — the
+  supervisor is what starts, monitors, restarts and stops them from now on.
+- listen_first_available() opens the control socket (VELOCITY_INIT_SOCKET,
+  default /run/velocity-init.sock). If none of the candidates can be opened,
+  a disabled ControlSocket is used so boot continues.
+- EventLoop::new() combines supervisor + control socket, then gets tuned:
+  set_jobs (parallelism cap), set_ctl_idle_timeout, set_sysv (if in sysv
+  mode), set_journal, and set_action_commands (Ctrl-Alt-Del / power actions).
+
+--------------------------------------------------------------------------------
+PART 9 — Running the event loop (boot to shutdown)    (main.rs, lines 501-518)
+--------------------------------------------------------------------------------
+The core of init's life: loop_.run(startup_levels).
+
+- The event loop starts the services level by level (respecting --jobs),
+  reaps children, restarts respawn-style services, accepts control-socket
+  commands (velocityctl status/start/stop/telinit...), handles signals
+  (Ctrl-Alt-Del, power button), and finally tears services down.
+- Because PID 1 must never die from a bug, run() is wrapped in
+  std::panic::catch_unwind:
+    * normal return -> a ShutdownAction (PowerOff / Reboot / Halt)
+    * panic as PID 1 -> logged, then panic_hold() keeps the kernel alive
+    * panic when not PID 1 -> returns an error
+
+--------------------------------------------------------------------------------
+PART 10 — Teardown, final reboot, and the panic hold   (main.rs, lines 520-697)
+--------------------------------------------------------------------------------
+Everything that happens after the event loop stops, plus the emergency code:
+
+- The control socket file is unlinked (best effort).
+- As PID 1: mounts::teardown_filesystems() unmounts what init mounted, then
+  final_reboot() issues the actual reboot: RB_POWER_OFF, RB_AUTOBOOT or
+  RB_HALT_SYSTEM depending on the ShutdownAction.
+- final_reboot() checks the NSpid depth first: inside a nested PID namespace
+  the runtime decides the machine's fate, so no reboot syscall is issued and
+  init simply exits 0.
+- Teardown is also catch_unwind-wrapped: a panic there must not kill the
+  kernel either; it lands in the same hold.
+- panic_hold() (never returns): keeps PID 1 alive after an unrecoverable
+  panic. It reaps zombies so they cannot pile up, and handles SIGINT
+  (Ctrl-Alt-Del -> reboot) and SIGPWR (power button -> power off). Services
+  are deliberately NOT restarted because the supervisor state is untrusted.
+- Supporting helpers that live at the bottom of the file are part of this
+  part too: claim_stdio(), final_reboot(), install_panic_hook(),
+  panic_payload_message(), panic_hold() and pid_ns_depth().
+
+If not PID 1, init logs that it skips teardown/reboot and exits cleanly.
+
+================================================================================
+SUMMARY (one line per part)
+================================================================================
+ 1. Harden the process so PID 1 cannot be killed or torn down by failure.
+ 2. Parse CLI flags, merge them over environment defaults.
+ 3. Bring up console + journal logging for everything else.
+ 4. Read the inittab and choose native vs sysv boot (with safety gates).
+ 5. Discover services and compute the parallel dependency-ordered plan.
+ 6. (Optional) print the dry-run plan and exit without executing it.
+ 7. As PID 1: mount filesystems and the fstab before anything runs.
+ 8. Assemble supervisor, control socket and event loop.
+ 9. Run the event loop: boot, supervise, handle commands/signals, stop.
+10. Tear down, reboot/poweroff/halt, or hold the system alive after a panic.
+================================================================================

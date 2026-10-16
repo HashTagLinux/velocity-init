@@ -69,7 +69,7 @@ const C_RUNTIME: &str = match (cfg!(target_env = "gnu"), cfg!(target_env = "musl
 fn print_build_info(full: bool) {
     if full {
         println!(
-            "velocity-init {} ({}) | {} PID 1 | opt-3 + lto + strip + panic-abort | {}",
+            "velocity-init {} ({}) | {} PID 1 | opt-3 + lto + strip + panic-unwind | {}",
             env!("CARGO_PKG_VERSION"),
             BUILD_ID,
             C_RUNTIME,
@@ -149,6 +149,7 @@ fn discover_services(init_dir: &str) -> Result<Vec<Service>> {
 }
 
 fn main() -> Result<()> {
+    install_panic_hook();
 
     let is_pid1 = getpid() == nix::unistd::Pid::from_raw(1);
 
@@ -216,7 +217,13 @@ fn main() -> Result<()> {
                     "velocity-init: journal unavailable ({}); console logging only",
                     e
                 );
-                (None, journal_candidates[0].to_string_lossy().into_owned())
+                let fallback = journal_candidates
+                    .first()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| {
+                        velocity_init::paths::DEFAULT_JOURNAL_PATH.to_string()
+                    });
+                (None, fallback)
             }
         };
 
@@ -384,7 +391,10 @@ fn main() -> Result<()> {
 
     if opts.dry_run {
         if sysv_active {
-            let ctx = sysv_ctx.as_ref().expect("sysv dry-run has context");
+            let Some(ctx) = sysv_ctx.as_ref() else {
+                error!("sysv dry-run has no prepared context — nothing to plan");
+                return Ok(());
+            };
             println!();
             println!("─── SysV inittab Plan (runlevel {}) ───", ctx.level);
             println!(
@@ -488,7 +498,23 @@ fn main() -> Result<()> {
 
     loop_.set_journal(logger, std::path::PathBuf::from(&journal_path));
     loop_.set_action_commands(action_commands);
-    let action = loop_.run(startup_levels).context("event loop failed")?;
+    // PID 1 must never abort: an unexpected panic in the event loop is
+    // contained here — logged, then turned into the degraded panic hold
+    // instead of "Attempted to kill init".
+    let loop_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        loop_.run(startup_levels)
+    }));
+    let action = match loop_result {
+        Ok(res) => res.context("event loop failed")?,
+        Err(payload) => {
+            let msg = panic_payload_message(payload.as_ref());
+            error!("event loop panicked: {msg}");
+            if is_pid1 {
+                panic_hold();
+            }
+            anyhow::bail!("event loop panicked: {msg}");
+        }
+    };
     info!("teardown complete — finalizing ({})", action);
 
     let _ = unlink(&ctl_path);
@@ -496,8 +522,16 @@ fn main() -> Result<()> {
     if is_pid1 {
 
         let ns_depth = pid_ns_depth();
-        mounts::teardown_filesystems();
-        final_reboot(action, ns_depth);
+        // Teardown runs after the loop has stopped services; a panic
+        // here must not kill the kernel either, so it lands in the hold.
+        let teardown = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            mounts::teardown_filesystems();
+            final_reboot(action, ns_depth);
+        }));
+        if teardown.is_err() {
+            error!("panic during teardown; holding the system instead of exiting");
+            panic_hold();
+        }
     } else {
         info!("not PID 1 — skipping filesystem teardown and reboot syscall");
     }
@@ -533,15 +567,33 @@ fn claim_stdio() {
 fn final_reboot(action: velocity_init::models::ShutdownAction, ns_depth: usize) {
     use nix::sys::reboot::{reboot, RebootMode};
     use velocity_init::models::ShutdownAction;
+    use velocity_init::namespaces;
 
     nix::unistd::sync();
 
     let depth = ns_depth;
-    if depth > 1 {
+    let userns = namespaces::in_mapped_user_namespace();
+    let sandbox = namespaces::sandbox_requested();
+    if depth > 1 || userns || sandbox {
+        if sandbox && depth <= 1 && !userns {
+            // The sandbox override is only ever set by scripts/sandbox.sh.
+            // No other probe fired, so this looks like a real machine —
+            // where exiting 0 instead of rebooting would panic the kernel.
+            warn!(
+                "{} is set but no namespace probe fired — suppressing reboot(2) \
+                 anyway; unset it on production machines",
+                namespaces::SANDBOX_ENV
+            );
+        }
         info!(
-            "running in a nested PID namespace (NSpid depth {}): the runtime — not us — decides \\
-             what happens to the machine, so {} was not issued; exiting 0",
-            depth, action
+            "nested runtime detected (NSpid depth {}, mapped user namespace: {}, {}: {}): \
+             the runtime — not us — decides what happens to the machine, so {} was not \
+             issued; exiting 0",
+            depth,
+            userns,
+            namespaces::SANDBOX_ENV,
+            sandbox,
+            action
         );
         return;
     }
@@ -554,6 +606,99 @@ fn final_reboot(action: velocity_init::models::ShutdownAction, ns_depth: usize) 
     match reboot(mode) {
         Ok(never) => match never {},
         Err(e) => error!("reboot({}) failed: {} — exiting", action, e),
+    }
+}
+
+/// Install the panic hook before anything else runs.
+///
+/// Writes straight to stderr with the error ignored: a panic may have
+/// poisoned the journal mutexes, and a lock().unwrap() in the hook
+/// would double-panic — which aborts even with unwinding enabled.
+fn install_panic_hook() {
+    std::panic::set_hook(Box::new(|info| {
+        use std::io::Write;
+        let msg = format!("velocity-init: PANIC: {info}");
+        let _ = writeln!(std::io::stderr(), "{msg}");
+    }));
+}
+
+/// Pull a readable message out of a panic payload.
+fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(s) = payload.downcast_ref::<&'static str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "<non-string panic payload>".to_string()
+    }
+}
+
+/// Contain a panic that escaped the event loop by keeping PID 1 alive.
+///
+/// Exiting (or aborting) as PID 1 makes the kernel panic ("Attempted to
+/// kill init"). The hold reaps children so they cannot pile up as
+/// zombies, and keeps Ctrl-Alt-Del (SIGINT) and the power button
+/// (SIGPWR) working. Services are deliberately *not* restarted: the
+/// supervisor state can no longer be trusted. Never returns.
+fn panic_hold() -> ! {
+    use nix::sys::reboot::{reboot, RebootMode};
+    use nix::sys::signal::{sigprocmask, SigSet, SigmaskHow, Signal};
+    use nix::sys::signalfd::{SfdFlags, SignalFd};
+    use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
+    use nix::unistd::Pid as NixPid;
+
+    error!("panic hold: PID 1 stays alive so the kernel does too");
+    error!("panic hold: services are no longer supervised");
+    error!("panic hold: Ctrl-Alt-Del reboots, the power button powers off");
+
+    // Ctrl-Alt-Del arrives as SIGINT, the power button as SIGPWR; block
+    // both so the signalfd below is their only delivery path. (The
+    // event loop had them blocked already; this is the panic path, so
+    // be explicit.) Failure is not fatal — the hold still reaps.
+    let mut mask = SigSet::empty();
+    mask.add(Signal::SIGINT);
+    mask.add(Signal::SIGPWR);
+    let _ = sigprocmask(SigmaskHow::SIG_BLOCK, Some(&mask), None);
+    let signals = SignalFd::with_flags(&mask, SfdFlags::SFD_NONBLOCK | SfdFlags::SFD_CLOEXEC).ok();
+
+    loop {
+        // Reap whatever the unsupervised services leave behind.
+        loop {
+            match waitpid(NixPid::from_raw(-1), Some(WaitPidFlag::WNOHANG)) {
+                Ok(WaitStatus::StillAlive) | Err(_) => break,
+                Ok(_) => continue,
+            }
+        }
+
+        if let Some(sfd) = signals.as_ref() {
+            if let Ok(Some(si)) = sfd.read_signal() {
+                match Signal::try_from(si.ssi_signo as i32) {
+                    Ok(Signal::SIGINT) => {
+                        info!("panic hold: SIGINT (Ctrl-Alt-Del) — rebooting");
+                        nix::unistd::sync();
+                        match reboot(RebootMode::RB_AUTOBOOT) {
+                            Ok(never) => match never {},
+                            Err(e) => {
+                                error!("panic hold: reboot failed: {e} — use the reset button")
+                            }
+                        }
+                    }
+                    Ok(Signal::SIGPWR) => {
+                        info!("panic hold: SIGPWR (power button) — powering off");
+                        nix::unistd::sync();
+                        match reboot(RebootMode::RB_POWER_OFF) {
+                            Ok(never) => match never {},
+                            Err(e) => {
+                                error!("panic hold: poweroff failed: {e} — press the power button")
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        std::thread::sleep(std::time::Duration::from_millis(200));
     }
 }
 

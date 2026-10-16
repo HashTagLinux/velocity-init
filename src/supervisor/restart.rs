@@ -352,10 +352,14 @@ impl super::Supervisor {    /// Handle a reaped child: match the PID to a servic
                 SvcTimer { fd, purpose: None },
             );
         }
-        let timer = self
-            .timers
-            .get_mut(name)
-            .expect("timer was just inserted or already existed");
+        // The entry was just inserted above; if it is nevertheless gone,
+        // fail this restart instead of panicking PID 1.
+        let Some(timer) = self.timers.get_mut(name) else {
+            return Err(SupervisorError::Timer {
+                service: name.to_string(),
+                source: Errno::ENOENT,
+            });
+        };
         let _ = disarm(&timer.fd);
 
         // A `timerfd` armed with a zero it_value is *disarmed*, so an

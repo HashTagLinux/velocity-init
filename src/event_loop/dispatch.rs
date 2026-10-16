@@ -625,7 +625,10 @@ impl super::EventLoop {
                     | WaitStatus::PtraceSyscall(_),
                 ) => continue,
                 Ok(status) => {
-                    // waitpid(-1) infers the pid; normalize it here.
+                    // waitpid(-1) infers the pid; normalize it here. The
+                    // outer match already broke on `StillAlive`, so it
+                    // cannot appear — but PID 1 has no panicking
+                    // branches: unreachable shapes just end the sweep.
                     let pid = match status {
                         WaitStatus::Exited(pid, _) => pid,
                         WaitStatus::Signaled(pid, _, _) => pid,
@@ -633,7 +636,7 @@ impl super::EventLoop {
                         | WaitStatus::Continued(pid)
                         | WaitStatus::PtraceEvent(pid, _, _)
                         | WaitStatus::PtraceSyscall(pid) => pid,
-                        WaitStatus::StillAlive => unreachable!(),
+                        WaitStatus::StillAlive => break,
                     };
                     self.supervisor.handle_child_exit(pid, status);
                 }

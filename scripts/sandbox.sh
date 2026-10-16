@@ -35,7 +35,12 @@
 #   * cgroup writes          : still denied (the real cgroup2 fs belongs
 #                              to the initial user namespace), so the
 #                              cgroup paths no-op
-#   * reboot(2)              : refused — CAP_SYS_BOOT is only held in the
+#   * reboot(2)              : never issued — velocity-init probes the
+#                              mapped uid map (plus VELOCITY_SANDBOX=1)
+#                              and takes its nested-runtime path, exiting
+#                              0. If it *were* called anyway, the kernel
+#                              would turn it into a SIGINT for PID 1:
+#                              CAP_SYS_BOOT is only held in the
 #                              namespace, not in the initial user
 #                              namespace
 #
@@ -97,6 +102,8 @@ abs_inittab="$(abspath "$INITTAB")"
 abs_initdir="$(abspath "$INITDIR")"
 abs_driver="$(abspath "$DRIVER")"
 
+# velocity-init reads this in final_reboot (src/namespaces.rs): it forces
+# the nested-runtime path even if the uid-map probe ever misses the map.
 export VELOCITY_SANDBOX=1
 
 # The fixture paths and the command are passed as *arguments* to the

@@ -57,7 +57,7 @@ quiet — that way each init supervises exactly one thing.
 
 | init          | boot | supervision | shutdown                                        |
 |---------------|------|-------------|-------------------------------------------------|
-| velocity-init | fast | respawns after ~1 s (OnFailure exponential backoff, first attempt 1 s) | SIGTERM → halt teardown: services stopped in reverse order, cgroup sweep, `reboot(2)` attempt (EPERM in safe mode, logged), exit 0 |
+| velocity-init | fast | respawns after ~100 ms (OnFailure exponential backoff, first attempt 100 ms, doubling to a 30 s cap) | SIGTERM → halt teardown: services stopped in reverse order, cgroup sweep, `reboot(2)` attempt (EPERM in safe mode, logged), exit 0 |
 | OpenRC        | fast | **no respawn** — OpenRC does not supervise foreground/daemon services by default | SIGTERM → openrc-init runs the shutdown runlevel (stop function kills the pidfile pid), then exits |
 | Dinit         | fast | respawns quickly (no backoff by default) | SIGTERM → stops services in dependency order, exits |
 
@@ -136,7 +136,8 @@ How I read that:
   extra for its runlevel dance (sysinit/boot/default + dep cache).
   velocity-init and dinit came out even here.
 - **Supervision**: velocity-init came back after its ~1 s backoff
-  (1025/1027/1028 ms — that's the exponential backoff's first try),
+  (1025/1027/1028 ms — that's the exponential backoff's first try;
+  the base has since been lowered to 100 ms, so expect ~125 ms),
   dinit came back in ~4 ms (no backoff by default), OpenRC didn't come
   back at all (normal — it doesn't supervise LSB scripts, and honestly
   that's the column this project exists for). Clean stops
